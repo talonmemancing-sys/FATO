@@ -470,11 +470,11 @@
             <div class="preview-row"><span class="k" data-i18n="prev.recv">实际到手</span><span class="v big" id="prev-fato-out">—</span></div>
             <div class="preview-row"><span class="k" data-i18n="prev.min">最小到手 (滑点 15%)</span><span class="v" id="prev-fato-min">—</span></div>
           </div>
-          <button class="btn fato" id="btn-fato" data-i18n="btn.buyfato">买入 · FATO</button>
+          <button type="button" class="btn fato" id="btn-fato" data-i18n="btn.buyfato">买入 · FATO</button>
           <div class="note" id="approveNote" style="display:none;">
             <b data-i18n="approve.label">需要授权 ·</b>
             <span data-i18n="approve.text">首次使用 FATO 需一次性授权</span>
-            <button class="btn fato" id="btn-approve" style="margin-top:8px;padding:8px;" data-i18n="btn.approve">授权 FATO</button>
+            <button type="button" class="btn fato" id="btn-approve" style="margin-top:8px;padding:8px;" data-i18n="btn.approve">授权 FATO</button>
           </div>
         </div>
 
@@ -803,6 +803,17 @@ function buildWalletList() {
 function openWalletModal() { buildWalletList(); $('walletModal').classList.add('show'); }
 function closeWalletModal() { $('walletModal').classList.remove('show'); }
 
+/** 发交易前必须调用：用当前钱包 Signer 重建合约，避免 fato/cz 仍是只读 Provider 导致不弹窗、不广播。 */
+async function getWriteContracts() {
+  if (!provider) return null;
+  const s = await provider.getSigner();
+  account = await s.getAddress();
+  signer = s;
+  cz = new ethers.Contract(CONFIG.CZTO, ABI_CZTO, s);
+  fato = new ethers.Contract(CONFIG.FATO, ABI_ERC20, s);
+  return { cz, fato, signer: s };
+}
+
 async function connectWith(injected, name) {
   closeWalletModal();
   try {
@@ -1041,14 +1052,15 @@ async function refreshPreview() {
 }
 
 async function doBuyBNB() {
-  if (!signer) return toast(t('tx.connect_first'), 'bad');
+  const W = await getWriteContracts();
+  if (!W) return toast(t('tx.connect_first'), 'bad');
   const v = parseFloat($('inBnb').value);
   if (!v || v <= 0) return toast(t('tx.enter_amount'), 'bad');
   try {
     const wei = ethers.parseUnits(v.toString(), 18);
-    const out = await cz.quoteBuyBNB(wei);
+    const out = await W.cz.quoteBuyBNB(wei);
     const min = (out * BigInt(SLIP_BPS)) / 10000n;
-    const tx = await cz.buyBNB(min, { value: wei });
+    const tx = await W.cz.buyBNB(min, { value: wei });
     toast(t('tx.submitted') + ': ' + tx.hash.slice(0,10) + '…');
     await tx.wait();
     toast(t('tx.confirmed'), 'good');
@@ -1057,16 +1069,17 @@ async function doBuyBNB() {
 }
 
 async function doBuyFATO() {
-  if (!signer) return toast(t('tx.connect_first'), 'bad');
+  const W = await getWriteContracts();
+  if (!W) return toast(t('tx.connect_first'), 'bad');
   const v = parseFloat($('inFato').value);
   if (!v || v <= 0) return toast(t('tx.enter_amount'), 'bad');
   try {
     const fIn = ethers.parseUnits(v.toString(), 18);
-    const allow = await fato.allowance(account, CONFIG.CZTO);
+    const allow = await W.fato.allowance(account, CONFIG.CZTO);
     if (allow < fIn) return toast(t('tx.approve_first'), 'bad');
-    const out = await cz.quoteBuyFATO(fIn);
+    const out = await W.cz.quoteBuyFATO(fIn);
     const min = (out * BigInt(SLIP_BPS)) / 10000n;
-    const tx = await cz.buyFATO(fIn, min);
+    const tx = await W.cz.buyFATO(fIn, min);
     toast(t('tx.submitted') + ': ' + tx.hash.slice(0,10) + '…');
     await tx.wait();
     toast(t('tx.confirmed'), 'good');
@@ -1075,25 +1088,32 @@ async function doBuyFATO() {
 }
 
 async function doApprove() {
-  if (!signer) return toast(t('tx.connect_first'), 'bad');
   try {
-    const tx = await fato.approve(CONFIG.CZTO, ethers.MaxUint256);
-    toast(t('tx.approving'));
+    const W = await getWriteContracts();
+    if (!W) return toast(t('tx.connect_first'), 'bad');
+    const tx = await W.fato.approve(CONFIG.CZTO, ethers.MaxUint256);
+    toast(t('tx.submitted') + ': ' + tx.hash.slice(0, 10) + '…');
     await tx.wait();
     toast(t('tx.approved'), 'good');
+    await refresh();
     await refreshPreview();
-  } catch (e) { console.error(e); toast(e.shortMessage || e.message, 'bad'); }
+  } catch (e) {
+    console.error(e);
+    const msg = e?.shortMessage || e?.message || (typeof e === 'string' ? e : 'approve failed');
+    toast(msg, 'bad');
+  }
 }
 
 async function doSell() {
-  if (!signer) return toast(t('tx.connect_first'), 'bad');
+  const W = await getWriteContracts();
+  if (!W) return toast(t('tx.connect_first'), 'bad');
   const v = parseFloat($('inCzto').value);
   if (!v || v <= 0) return toast(t('tx.enter_amount'), 'bad');
   try {
     const tIn = ethers.parseUnits(v.toString(), 18);
-    const out = await cz.quoteSellBase(tIn);
+    const out = await W.cz.quoteSellBase(tIn);
     const min = (out * BigInt(SLIP_BPS)) / 10000n;
-    const tx = await cz.sell(tIn, min);
+    const tx = await W.cz.sell(tIn, min);
     toast(t('tx.submitted') + ': ' + tx.hash.slice(0,10) + '…');
     await tx.wait();
     toast(t('tx.confirmed'), 'good');
@@ -1102,11 +1122,12 @@ async function doSell() {
 }
 
 async function doClaim() {
-  if (!signer) return toast(t('tx.connect_first'), 'bad');
+  const W = await getWriteContracts();
+  if (!W) return toast(t('tx.connect_first'), 'bad');
   try {
-    const w = await cz.withdrawableDividend(account);
+    const w = await W.cz.withdrawableDividend(account);
     if (w == 0n) return toast(t('tx.no_dividends'), 'bad');
-    const tx = await cz.claimDividend();
+    const tx = await W.cz.claimDividend();
     toast(t('tx.claiming') + ' ' + tx.hash.slice(0,10) + '…');
     await tx.wait();
     toast(t('tx.claim_ok'), 'good');
